@@ -469,8 +469,9 @@ def speech_api(version: int = 1) -> Response:
         reply["errmsg"] = "Invalid or missing API key."
         return better_jsonify(**reply)
 
-    text = request.values.get("text")
+    text = request.values.get("text", "").strip()
     if not text:
+        reply["errmsg"] = "Empty text param."
         return better_jsonify(**reply)
 
     fmt = request.values.get("format", "ssml")
