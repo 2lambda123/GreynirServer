@@ -24,7 +24,6 @@
 import pytest
 import os
 import json
-from urllib.parse import urlencode
 import sys
 
 from flask.testing import FlaskClient
@@ -37,8 +36,6 @@ if mainpath not in sys.path:
     sys.path.insert(0, mainpath)
 
 from main import app  # noqa
-from db import SessionContext  # noqa
-from db.models import Query, QueryData  # noqa
 from utility import read_api_key  # noqa
 
 # pylint: disable=unused-wildcard-import
@@ -104,6 +101,8 @@ def test_routes(client: FlaskClient):
                 method = getattr(client, m.lower())
                 resp = method(route)
                 assert resp.status in ("200 OK", "202 ACCEPTED")
+    resp = client.get("/this_does_not_exist")
+    assert resp.status in ("404 NOT FOUND")
 
 
 API_CONTENT_TYPE = "application/json"

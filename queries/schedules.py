@@ -199,9 +199,11 @@ def QSchThisMorning(node: Node, params: ParamList, result: Result) -> None:
 
 
 def QSchThisEvening(node: Node, params: ParamList, result: Result) -> None:
-    now = datetime.datetime.now()
+    # It is debatable whether the following calculation should
+    # occur in the client's time zone or in UTC (=Icelandic time)
+    now = datetime.datetime.utcnow()
     evening = datetime.time(20, 0)
-    result["qdate"] = now.date()
+    result["qdate"] = now.date()  # !!! FIXME: Use consistent date calculation functions
     result["qtime"] = evening if now.time() < evening else now.time()
     result["PM"] = True
 
@@ -227,7 +229,7 @@ def QSchYesterdayEvening(node: Node, params: ParamList, result: Result) -> None:
 
 
 def QSchNow(node: Node, params: ParamList, result: Result) -> None:
-    now = datetime.datetime.now()
+    now = datetime.datetime.utcnow()
     result["qdate"] = now.date()
     result["qtime"] = now.time()
 
@@ -426,7 +428,6 @@ def _get_current_and_next_program(
 
         # Try to also fetch next program if get_next is True
         if get_next:
-
             # Deal with RÚV sub-events
             if station == _RUV and len(sub_progs):
                 if len(progs) > 1:
@@ -451,7 +452,7 @@ def _get_current_and_next_program(
                 # set it as the next program/event
                 next_playing = progs[1]
 
-    elif qdatetime > datetime.datetime.now() - datetime.timedelta(minutes=5):
+    elif qdatetime > datetime.datetime.utcnow() - datetime.timedelta(minutes=5):
         # Nothing playing at qdatetime,
         # fetch next program if query isn't for past schedule
         next_playing = progs[0]
@@ -477,7 +478,6 @@ def _extract_title_and_desc(prog: Dict[str, Any], station: str) -> Tuple[str, st
                 desc = prog["details"].get("series-description", "") or ""
 
     elif station == _STOD_TVO:
-
         title = prog.get("isltitill", "") or ""
         # Backup title
         if title == "":
@@ -520,7 +520,7 @@ def _answer_next_program(
         expire_time: when the answer becomes outdated.
     """
     answer: str = ""
-    prog_endtime: datetime.datetime = datetime.datetime.now()
+    prog_endtime: datetime.datetime = datetime.datetime.utcnow()
 
     if next_prog:
         next_title, next_desc = _extract_title_and_desc(next_prog, station)
@@ -566,17 +566,18 @@ def _answer_program(
         expire_time: when the answer becomes outdated.
     """
 
+    now = datetime.datetime.utcnow()
     answer: str = ""
     voice: str
     is_now: bool
-    is_future: bool = qdatetime > datetime.datetime.now()
+    is_future: bool = qdatetime > now
     showtime: str = ""
     vshowtime: str = ""
     showing: str
     prog_endtime: Optional[datetime.datetime] = None
 
     # If qdatetime is within one minute of now
-    is_now = abs(datetime.datetime.now() - qdatetime) <= datetime.timedelta(minutes=1)
+    is_now = abs(now - qdatetime) <= datetime.timedelta(minutes=1)
 
     if is_now:
         showing = f"er verið að {'spila' if is_radio else 'sýna'} dagskrárliðinn"
@@ -638,7 +639,7 @@ def _get_schedule_answer(result: Result) -> _AnswerDict:
     station: str = result.get("station")
     is_radio: bool = result.get("channel_type") == _RADIO
 
-    now: datetime.datetime = datetime.datetime.now()
+    now = datetime.datetime.utcnow()
     now_date: datetime.date = now.date()
     now_time: datetime.time = now.time()
 

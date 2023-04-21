@@ -22,7 +22,7 @@
 
 """
 
-from typing import Dict, Any, List, Optional, cast
+from typing import Dict, Any, Iterable, List, Optional, cast
 
 from datetime import datetime
 import logging
@@ -34,7 +34,7 @@ from settings import Settings
 
 from tnttagger import ifd_tag
 from db import SessionContext
-from db.models import ArticleTopic, Query, Feedback, QueryData
+from db.models import ArticleTopic, Query, Feedback, QueryData, Summary
 from treeutil import TreeUtility
 from reynir.bintokenizer import TokenDict
 from reynir.binparser import canonicalize_token
@@ -49,11 +49,12 @@ from speech import (
     RECOMMENDED_VOICES,
     DEFAULT_VOICE_SPEED,
 )
+from speech.voices import voice_for_locale
+from queries.util.openai_gpt import summarize
 from utility import read_api_key, icelandic_asciify
 
 from . import routes, better_jsonify, text_from_request, bool_from_request
 from . import MAX_URL_LENGTH, MAX_UUID_LENGTH
-from . import async_task
 
 
 @routes.route("/ifdtag.api", methods=["GET", "POST"])
@@ -89,8 +90,6 @@ def analyze_api(version: int = 1) -> Response:
         pgs, stats, register = TreeUtility.tag_text(session, text, all_names=True)
         # Return the tokens as a JSON structure to the client
         return better_jsonify(valid=True, result=pgs, stats=stats, register=register)
-    # Should not get here - this return is mostly to placate Pylance
-    return Response("Error", status=403)
 
 
 @routes.route("/postag.api", methods=["GET", "POST"])
@@ -128,8 +127,6 @@ def postag_api(version: int = 1) -> Response:
         # Return the tokens as a JSON structure to the client
         return better_jsonify(valid=True, result=pa, stats=stats, register=register)
 
-    return Response("Error", status=403)
-
 
 @routes.route("/parse.api", methods=["GET", "POST"])
 @routes.route("/parse.api/v<int:version>", methods=["GET", "POST"])
@@ -161,8 +158,6 @@ def parse_api(version: int = 1) -> Response:
         # Return the tokens as a JSON structure to the client
         return better_jsonify(valid=True, result=pgs, stats=stats, register=register)
 
-    return Response("Error", status=403)
-
 
 @routes.route("/article.api", methods=["GET", "POST"])
 @routes.route("/article.api/v<int:version>", methods=["GET", "POST"])
@@ -172,8 +167,9 @@ def article_api(version: int = 1) -> Response:
     if not (1 <= version <= 1):
         return better_jsonify(valid=False, reason="Unsupported version")
 
-    url: Optional[str] = request.values.get("url")
-    uuid: Optional[str] = request.values.get("id")
+    rv = cast(Dict[str, str], request.values)
+    url: Optional[str] = rv.get("url")
+    uuid: Optional[str] = rv.get("id")
 
     if url:
         url = url.strip()[0:MAX_URL_LENGTH]
@@ -186,7 +182,6 @@ def article_api(version: int = 1) -> Response:
         return better_jsonify(valid=False, reason="No url or id specified in query")
 
     with SessionContext(commit=True) as session:
-
         if uuid:
             a = ArticleProxy.load_from_uuid(uuid, session)
         elif url and url.startswith(("http:", "https:")):
@@ -223,7 +218,97 @@ def article_api(version: int = 1) -> Response:
             topics=topics,
         )
 
-    return Response("Error", status=403)
+
+@routes.route("/summary.api", methods=["GET", "POST"])
+@routes.route("/summary.api/v<int:version>", methods=["GET", "POST"])
+def summary_api(version: int = 1) -> Response:
+    """Obtain a summary of an article, given its URL or id"""
+
+    if not (1 <= version <= 1):
+        return better_jsonify(valid=False, reason="Unsupported version")
+
+    rv = cast(Dict[str, str], request.values)
+    url: Optional[str] = rv.get("url")
+    uuid: Optional[str] = rv.get("id")
+
+    if url:
+        url = url.strip()[0:MAX_URL_LENGTH]
+    if uuid:
+        uuid = uuid.strip()[0:MAX_UUID_LENGTH]
+    if url:
+        # URL has priority, if both are specified
+        uuid = None
+    if not url and not uuid:
+        return better_jsonify(valid=False, reason="No url or id specified in query")
+
+    with SessionContext(commit=True) as session:
+        if uuid:
+            a = ArticleProxy.load_from_uuid(uuid, session)
+        elif url and url.startswith(("http:", "https:")):
+            a = ArticleProxy.load_from_url(url, session)
+        else:
+            a = None
+
+        if a is None:
+            return better_jsonify(valid=False, reason="Article not found")
+
+        if a.html is None:
+            return better_jsonify(valid=False, reason="Unable to fetch article")
+
+        # Fetch names of article topics, if any
+        topics = (
+            session.query(ArticleTopic).filter(ArticleTopic.article_id == a.uuid).all()
+        )
+        topics = [dict(name=t.topic.name, id=t.topic.identifier) for t in topics]
+
+        # Generate a summary of the article in the indicated languages,
+        # if not already available
+        summary_rows: Dict[str, Optional[Summary]] = dict(
+            is_IS=None, en_US=None, pl_PL=None
+        )
+        sr: Iterable[Summary] = (
+            session.query(Summary).filter(Summary.article_id == a.uuid).all()
+        )
+        # Collect the summary data we already have
+        for s in sr:
+            if s.language in summary_rows:
+                summary_rows[s.language] = s
+        # Find out which summaries are missing
+        missing = [k for k, v in summary_rows.items() if v is None]
+        if missing:
+            # At least one summary is missing: generate it
+            now = datetime.utcnow()
+            # Collect the text of the article from the tokens
+            text = a.text()
+            # Update our summaries
+            summaries = summarize(text, missing)
+            # Insert summaries for the missing languages
+            for lang in missing:
+                if lang not in summaries:
+                    continue
+                sr = Summary(
+                    article_id=a.uuid,
+                    language=lang,
+                    summary=summaries[lang],
+                    # Currently no text for other languages,
+                    # but this may be added later via GPT translation
+                    text=text if lang == "is_IS" else "",
+                    timestamp=now,
+                )
+                session.add(sr)
+                summary_rows[lang] = sr
+
+        return better_jsonify(
+            valid=True,
+            url=a.url,
+            id=a.uuid,
+            heading=a.heading,
+            author=a.author,
+            ts=a.timestamp.isoformat()[0:19],
+            num_sentences=a.num_sentences,
+            topics=topics,
+            summary={k: v.summary for k, v in summary_rows.items() if v},
+        )
 
 
 @routes.route("/reparse.api", methods=["POST"])
@@ -292,7 +377,8 @@ def query_api(version: int = 1) -> Response:
         return better_jsonify(valid=False, reason="Unsupported version")
 
     # String with query
-    qs: str = request.values.get("q", "")
+    rv = cast(Dict[str, str], request.values)
+    qs: str = rv.get("q", "")
     # q param contains one or more |-separated strings
     mq: List[str] = qs.split("|")[0:_MAX_QUERY_VARIANTS]
     # Retain only nonempty strings in qs
@@ -301,10 +387,10 @@ def query_api(version: int = 1) -> Response:
     # If voice is set, return a voice-friendly string
     voice = bool_from_request(request, "voice")
     # Request a particular voice
-    voice_id: str = icelandic_asciify(request.values.get("voice_id", DEFAULT_VOICE))
+    voice_id: str = icelandic_asciify(rv.get("voice_id", DEFAULT_VOICE))
     # Request a particular voice speed
     try:
-        voice_speed = float(request.values.get("voice_speed", DEFAULT_VOICE_SPEED))
+        voice_speed = float(rv.get("voice_speed", DEFAULT_VOICE_SPEED))
     except ValueError:
         voice_speed = DEFAULT_VOICE_SPEED
 
@@ -314,15 +400,15 @@ def query_api(version: int = 1) -> Response:
     test = bool_from_request(request, "test")
 
     # Obtain the client's location, if present
-    slat: Optional[str] = request.values.get("latitude")
-    slon: Optional[str] = request.values.get("longitude")
+    slat: Optional[str] = rv.get("latitude")
+    slon: Optional[str] = rv.get("longitude")
 
     # Additional client info
     # !!! FIXME: The client_id for web browser clients is the browser user agent,
     # !!! which is not particularly useful. Consider using an empty string instead.
-    client_id: Optional[str] = request.values.get("client_id")
-    client_type: Optional[str] = request.values.get("client_type")
-    client_version: Optional[str] = request.values.get("client_version")
+    client_id: Optional[str] = rv.get("client_id")
+    client_type: Optional[str] = rv.get("client_type")
+    client_version: Optional[str] = rv.get("client_version")
     # When running behind an nginx reverse proxy, the client's remote
     # address is passed to the web application via the "X-Real-IP" header
     client_ip = request.remote_addr or request.headers.get("X-Real-IP")
@@ -373,6 +459,7 @@ def query_api(version: int = 1) -> Response:
         client_version=client_version,
         bypass_cache=True,  # Settings.DEBUG,
         private=private,
+        authenticated=_has_valid_api_key(request),
     )
 
     # Get URL for response synthesized speech audio
@@ -383,8 +470,17 @@ def query_api(version: int = 1) -> Response:
             # Parse <greynir> SSML tags and
             # phonetically transcribe their contents
             result["voice"] = v = GreynirSSMLParser(voice_id).transcribe(v)
+            # Check if a specific voice or voice locale was set by query module
+            vid = voice_id
+            if "voice_id" in result:
+                vid = result["voice_id"]
+            elif "voice_locale" in result and result["voice_locale"] != "is_IS":
+                # If a voice locale other than Icelandic is requested,
+                # use the default voice for that locale.
+                vid = voice_for_locale(result["voice_locale"])
+            result["voice_id"] = vid
             # Create audio data
-            url = text_to_audio_url(v, voice_id=voice_id, speed=voice_speed)
+            url = text_to_audio_url(v, voice_id=vid, speed=voice_speed)
             if url:
                 result["audio"] = file_url_to_host_url(url, request)
         response = cast(Optional[Dict[str, str]], result.get("response"))
@@ -407,6 +503,17 @@ def query_api(version: int = 1) -> Response:
     return better_jsonify(**result)
 
 
+def _has_valid_api_key(req: Request, allow_query_param: bool = False) -> bool:
+    """Check that the request has a valid API key.
+    The key can be provided either via an Authorization header or
+    (optionally) via a query parameter named 'api_key' (for legacy reasons)."""
+    key = request.headers.get("Authorization", "")
+    if not key and allow_query_param:
+        key = cast(Dict[str, str], request.values).get("api_key", "")
+    gak = read_api_key("GreynirServerKey")  # Cached
+    return all((gak, key, key == gak))
+
+
 @routes.route("/query_history.api", methods=["GET", "POST"])
 @routes.route("/query_history.api/v<int:version>", methods=["GET", "POST"])
 def query_history_api(version: int = 1) -> Response:
@@ -417,10 +524,7 @@ def query_history_api(version: int = 1) -> Response:
 
     resp: Dict[str, Any] = dict(valid=True)
 
-    # Calling this endpoint requires the Greynir API key
-    key = request.values.get("api_key")
-    gak = read_api_key("GreynirServerKey")
-    if not gak or not key or key != gak:
+    if not _has_valid_api_key(request, allow_query_param=True):
         resp["errmsg"] = "Invalid or missing API key."
         resp["valid"] = False
         return better_jsonify(**resp)
@@ -441,13 +545,13 @@ def query_history_api(version: int = 1) -> Response:
     with SessionContext(commit=True) as session:
         # Clear all logged user queries
         # pylint: disable=no-member
-        session.execute(Query.table().delete().where(Query.client_id == client_id))
+        q = cast(Any, Query).table()
+        session.execute(q.delete().where(Query.client_id == client_id))
         # Clear all user query data
         if action == "clear_all":
             # pylint: disable=no-member
-            session.execute(
-                QueryData.table().delete().where(QueryData.client_id == client_id)
-            )
+            qd = cast(Any, QueryData).table()
+            session.execute(qd.delete().where(QueryData.client_id == client_id))
 
     return better_jsonify(**resp)
 
@@ -462,24 +566,22 @@ def speech_api(version: int = 1) -> Response:
 
     reply: Dict[str, Any] = dict(err=True)
 
-    # Calling this endpoint requires the Greynir API key
-    key = request.values.get("api_key")
-    gak = read_api_key("GreynirServerKey")
-    if not gak or not key or key != gak:
+    if not _has_valid_api_key(request, allow_query_param=True):
         reply["errmsg"] = "Invalid or missing API key."
         return better_jsonify(**reply)
 
-    text = request.values.get("text", "").strip()
-    if not text:
+    rv = cast(Dict[str, str], request.values)
+    text = rv.get("text")
+    if not text or not text.strip():
         reply["errmsg"] = "Empty text param."
         return better_jsonify(**reply)
 
-    fmt = request.values.get("format", "ssml")
+    fmt = rv.get("format", "ssml")
     if fmt not in ["text", "ssml"]:
         fmt = "ssml"
-    voice_id = icelandic_asciify(request.values.get("voice_id", DEFAULT_VOICE))
+    voice_id = icelandic_asciify(rv.get("voice_id", DEFAULT_VOICE))
     try:
-        voice_speed = float(request.values.get("voice_speed", DEFAULT_VOICE_SPEED))
+        voice_speed = float(rv.get("voice_speed", DEFAULT_VOICE_SPEED))
     except ValueError:
         voice_speed = DEFAULT_VOICE_SPEED
 
@@ -525,10 +627,11 @@ def feedback_api(version: int = 1) -> Response:
     if not (1 <= version <= 1):
         return better_jsonify(valid=False, reason="Unsupported version")
 
-    name = request.values.get("name")
-    email = request.values.get("email")
-    comment = request.values.get("comment")
-    topic = request.values.get("topic")
+    rv = cast(Dict[str, str], request.values)
+    name = rv.get("name")
+    email = rv.get("email")
+    comment = rv.get("comment")
+    topic = rv.get("topic")
 
     if comment:
         with SessionContext(commit=True) as session:
@@ -587,14 +690,11 @@ def register_query_data_api(version: int = 1) -> Response:
     if not (1 <= version <= 1):
         return better_jsonify(valid=False, reason="Unsupported version")
 
-    qdata = request.json
+    qdata = cast(Optional[Dict[str, Any]], cast(Any, request).json)
     if qdata is None:
         return better_jsonify(valid=False, errmsg="Empty request.")
 
-    # Calling this endpoint requires the Greynir API key
-    key = qdata.get("api_key")
-    gak = read_api_key("GreynirServerKey")
-    if not gak or not key or key != gak:
+    if not _has_valid_api_key(request, allow_query_param=True):
         return better_jsonify(valid=False, errmsg="Invalid or missing API key.")
 
     if (

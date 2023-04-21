@@ -25,11 +25,13 @@
 from typing import Optional
 
 import logging
+import uuid
+from pathlib import Path
 
 import requests
 
+from . import AUDIO_SCRATCH_DIR, suffix_for_audiofmt
 from speech.trans import strip_markup
-from speech.voices import generate_data_uri, mimetype_for_audiofmt
 
 NAME = "Tiro"
 VOICES = frozenset(("Alfur", "Dilja", "Bjartur", "Rosa", "Alfur_v2", "Dilja_v2"))
@@ -89,14 +91,21 @@ def text_to_audio_url(
     voice_id: str,
     speed: float = 1.0,
 ) -> Optional[str]:
-    """Returns Tiro (data) URL for speech-synthesized text."""
+    """Returns URL for speech-synthesized text."""
 
     data = text_to_audio_data(**locals())
     if not data:
         return None
 
-    # Generate Data URI from the bytes received
-    mime_type = mimetype_for_audiofmt(audio_format)
-    data_uri = generate_data_uri(data, mime_type=mime_type)
+    suffix = suffix_for_audiofmt(audio_format)
+    out_fn: str = str(AUDIO_SCRATCH_DIR / f"{uuid.uuid4()}.{suffix}")
+    try:
+        with open(out_fn, "wb") as f:
+            f.write(data)
+    except Exception as e:
+        logging.error(f"Error writing audio file {out_fn}: {e}")
+        return None
 
-    return data_uri
+    # Generate and return file:// URL to audio file
+    url = Path(out_fn).as_uri()
+    return url

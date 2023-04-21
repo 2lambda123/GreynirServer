@@ -44,7 +44,7 @@ from main import app
 
 from settings import changedlocale
 from db import SessionContext
-from db.models import Query, QueryData, QueryLog
+from db.models import Query, QueryData  # , QueryLog
 from queries import ResponseDict
 from utility import read_api_key
 from speech.trans import strip_markup
@@ -110,7 +110,8 @@ def qmcall(
     assert "answer" in json
     if "voice" in qdict and qdict["voice"]:
         assert "voice" in json
-
+        assert "voice_id" in json
+        assert "voice_locale" in json
     if qtype is not None:
         assert json["qtype"] == qtype
 
@@ -165,10 +166,22 @@ def test_nonsense(client: FlaskClient) -> None:
     json = r.get_json()
     assert json
     assert "valid" in json
-    assert json["valid"] == True
+    assert json["valid"] == False
     assert "error" in json
     assert "answer" not in json
     assert "voice" not in json
+
+
+def test_voice_settings_integrity(client: FlaskClient) -> None:
+    """Make sure that the voice ID is returned to client in
+    response to a voice query, and that it is sane."""
+    json = qmcall(client, {"q": "Hver er tilgangur lífsins", "voice": True}, "Special")
+    assert json["voice_id"] == "Gudrun"
+    assert json["voice_locale"] == "is_IS"
+
+    json = qmcall(client, {"q": "Hver er tilgangur lífsins", "voice": True, "voice_id": "Gunnar"}, "Special")
+    assert json["voice_id"] == "Gunnar"
+    assert json["voice_locale"] == "is_IS"
 
 
 def test_arithmetic(client: FlaskClient) -> None:
@@ -579,15 +592,15 @@ def test_date(client: FlaskClient) -> None:
         json = qmcall(client, {"q": qstr}, "Date")
 
     json = qmcall(client, {"q": "hver er dagsetningin?", "voice": True}, "Date")
-    assert json["answer"].endswith(datetime.now().strftime("%Y"))
+    assert json["answer"].endswith(datetime.utcnow().strftime("%Y"))
     assert "tvö þúsund" in json["voice"]
 
     json = qmcall(client, {"q": "hvaða dagur er í dag?", "voice": True}, "Date")
-    assert json["answer"].endswith(datetime.now().strftime("%Y"))
+    assert json["answer"].endswith(datetime.utcnow().strftime("%Y"))
     assert "tvö þúsund" in json["voice"]
 
     json = qmcall(client, {"q": "hvaða dagur er á morgun", "voice": True}, "Date")
-    assert json["answer"].endswith(datetime.now().strftime("%Y"))
+    assert json["answer"].endswith(datetime.utcnow().strftime("%Y"))
     assert "tvö þúsund" in json["voice"]
 
     json = qmcall(client, {"q": "hvaða mánaðardagur var í gær", "voice": True}, "Date")
@@ -1224,8 +1237,14 @@ def test_special(client: FlaskClient) -> None:
     """Special module."""
 
     json = qmcall(client, {"q": "Hver er sætastur?", "voice": True}, "Special")
-    assert json["answer"] == "Tumi Þorsteinsson."
-    assert json["voice"] == "Tumi Þorsteinsson er langsætastur."
+    assert (
+        json["answer"] == "Tumi Þorsteinsson er langsætastur." or
+        json["answer"] == "Eyjólfur Þorsteinsson er langsætastur."
+    )
+    assert (
+        json["voice"] == "Tumi Þorsteinsson er langsætastur." or
+        json["voice"] == "Eyjólfur Þorsteinsson er langsætastur."
+    )
 
     json = qmcall(client, {"q": "Hver er tilgangur lífsins?"}, "Special")
     assert json["answer"].startswith("42")

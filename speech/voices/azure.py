@@ -31,22 +31,49 @@ import pathlib
 
 import azure.cognitiveservices.speech as speechsdk
 
-from utility import RESOURCES_DIR, STATIC_DIR
+from . import AUDIO_SCRATCH_DIR
+from utility import RESOURCES_DIR
 from speech.trans import DefaultTranscriber, strip_markup
 from speech.voices import suffix_for_audiofmt
 
 
 NAME = "Azure Cognitive Services"
 AUDIO_FORMATS = frozenset(("mp3", "pcm", "opus"))
-VOICES = frozenset(("Gudrun", "Gunnar"))
-
-_VOICE_TO_ID = {"Gudrun": "is-IS-GudrunNeural", "Gunnar": "is-IS-GunnarNeural"}
+_VOICE_TO_ID = {
+    # Icelandic
+    "Gudrun": "is-IS-GudrunNeural",
+    "Gunnar": "is-IS-GunnarNeural",
+    # English (UK)
+    "Abbi": "en-GB-AbbiNeural",
+    "Alfie": "en-GB-AlfieNeural",
+    # English (US)
+    "Jenny": "en-US-JennyNeural",
+    "Brandon": "en-US-BrandonNeural",
+    # French
+    "Brigitte": "fr-FR-BrigitteNeural",
+    "Alain": "fr-FR-AlainNeural",
+    # German
+    "Amala": "de-DE-AmalaNeural",
+    # Danish
+    "Christel": "da-DK-ChristelNeural",
+    "Jeppe": "da-DK-JeppeNeural",
+    # Swedish
+    "Sofie": "sv-SE-SofieNeural",
+    "Mattias": "sv-SE-MattiasNeural",
+    # Norwegian
+    "Finn": "nb-NO-FinnNeural",
+    "Iselin": "nb-NO-IselinNeural",
+    # Spanish
+    "Abril": "es-ES-AbrilNeural",
+    "Alvaro": "es-ES-AlvaroNeural",
+    # Polish
+    "Agnieszka": "pl-PL-AgnieszkaNeural",
+    "Marek": "pl-PL-MarekNeural",
+    # Many more voices available, see:
+    # https://learn.microsoft.com/en-us/azure/cognitive-services/speech-service/language-support
+}
+VOICES = frozenset(_VOICE_TO_ID.keys())
 _DEFAULT_VOICE_ID = "is-IS-GudrunNeural"
-
-
-# Directory for temporary audio files
-_SCRATCH_DIR = STATIC_DIR / "audio" / "tmp"
-
 
 # The Azure Speech API access key
 # You must obtain your own key if you want to use this code
@@ -120,7 +147,7 @@ def _synthesize_text(
 
         # Generate a unique filename for the audio output file
         suffix = suffix_for_audiofmt(audio_format)
-        out_fn: str = str(_SCRATCH_DIR / f"{uuid.uuid4()}.{suffix}")
+        out_fn: str = str(AUDIO_SCRATCH_DIR / f"{uuid.uuid4()}.{suffix}")
         audio_config = speechsdk.audio.AudioOutputConfig(filename=out_fn)  # type: ignore
 
         # Init synthesizer
